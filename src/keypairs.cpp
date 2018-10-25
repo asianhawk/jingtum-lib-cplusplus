@@ -9,7 +9,7 @@ std::string generateSeed() {
 	return __encode(SEED_PREFIX, seed);
 }
 
-unsigned char * deriveKeyPair(std::string sec, std::string *PublicKey, std::string *PrivateKey) {
+unsigned char * deriveKeyPair(std::string sec, std::string *PublicKey, std::string *PrivateKey, unsigned char *prik) {
 	
 	EC_GROUP *ec_group;  // 椭圆函数
 	BIGNUM *order;  // 椭圆函数的阶，secp256k1，常量
@@ -96,6 +96,7 @@ unsigned char * deriveKeyPair(std::string sec, std::string *PublicKey, std::stri
 	char tt[3] = { 0 };
 	int i;
 	for (i = 0; i < 32; ++i) {
+		prik[i] = to[i];
 		sprintf_s(tt, "%02x", to[i]);
 		strcat_s(secret, tt);
 	}
@@ -174,7 +175,7 @@ std::string base58encode(const std::string & hexstring)
 		result += base58char;
 	}
 	// deal with leading zeros
-	for (unsigned int i = 0; i < hexstring.length() - 1 && hexstring[i] == '0' && hexstring[i + 1] == '0'; ++i) {
+	for (unsigned int i = 0; i < hexstring.length() - 1 && hexstring[i] == '0' && hexstring[i + 1] == '0'; i+=2) {
 		result += alphabet[0];
 	}
 	std::reverse(result.begin(), result.end());
@@ -261,10 +262,13 @@ unsigned char * __decode(int version, std::string input) {
 
 	Convert(pt, ss);
 
-	if (pt[0] != version || half < 5) {
-		std::cout << "invalid input size" << std::endl;
-		throw 1;
+	try {
+		if (pt[0] != version || half < 5) {
+			throw std::string("invalid input size");
+		}
 	}
+	catch (std::string ex) { std::cout << ex << std::endl; exit(0); }
+	
 	unsigned char md1[SHA256_DIGEST_LENGTH];
 	unsigned char md2[SHA256_DIGEST_LENGTH];
 	SHA256((unsigned char *)pt, half - 4, md1);
@@ -280,11 +284,11 @@ unsigned char * __decode(int version, std::string input) {
 	}
 
 	unsigned char *res = new unsigned char[half];
-	for (i = 0; i < half - 1; ++i) {
+	for (i = 0; i < half-1; ++i) {
 		res[i] = pt[i + 1];
 	}
-	res[half - 1] = '\0';
-	return res;
+	//res[half - 1] = '\0';
+	return res;  
 }
 
 unsigned char * brand(int num) {
@@ -321,9 +325,20 @@ void Convert(unsigned char *pt, std::string ss) {
 	int len = ss.length() / 2;
 	int i;
 	for (i = 0; i < len; ++i) {
+		int high = hex2int(st[2*i]);
+		int low = hex2int(st[2*i+1]);
+		pt[i] = high * 16 + low;
+	}
+}
+
+void Convert(std::vector<unsigned char> *pt, std::string ss) {
+	const char *st = ss.c_str();
+	int len = ss.length() / 2;
+	int i;
+	for (i = 0; i < len; ++i) {
 		int high = hex2int(st[2 * i]);
 		int low = hex2int(st[2 * i + 1]);
-		pt[i] = high * 16 + low;
+		pt->push_back(high * 16 + low);
 	}
 }
 
@@ -336,4 +351,11 @@ bool checkAddress(std::string addr) {
 	else {
 		return true;
 	}	
+}
+
+unsigned char * convertAddressToBytes(std::string address) {
+	try {
+		return __decode(ACCOUNT_PREFIX, address);
+	}
+	catch (std::exception ex) { std::cout << ex.what()+ std::string("convertAddressToBytes error!") << std::endl; exit(0); }
 }

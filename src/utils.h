@@ -1,6 +1,8 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#define BOOST_SPIRIT_THREADSAFE
+
 #include <boost/regex.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -24,6 +26,11 @@ bool isValidSecret(std::string);
 bool isValidAmount(boost::property_tree::ptree);
 bool isValidCurrency(std::string);
 bool isValidAmount0(boost::property_tree::ptree);
+bool isNum(std::string);
+bool isInt(std::string);
+bool isJSON(std::string);
+
+boost::property_tree::ptree ToAmount(boost::property_tree::ptree);
 
 boost::property_tree::ptree LEDGER_FLAGS();
 boost::property_tree::ptree TransactionFlags();
@@ -36,6 +43,7 @@ boost::property_tree::ptree processAffectNode(boost::property_tree::ptree);
 std::string formatArgs(boost::property_tree::ptree);
 std::string UTF8_To_string(const std::string & str);
 std::string string_To_UTF8(const std::string & str);
+std::vector<unsigned char> convertHexToByteArray(std::string);
 
 bool isAmountZero(boost::property_tree::ptree);
 boost::property_tree::ptree AmountNegate(boost::property_tree::ptree);
@@ -49,5 +57,8 @@ boost::property_tree::ptree reverseAmount(boost::property_tree::ptree, std::stri
 
 boost::property_tree::ptree processTx(boost::property_tree::ptree, std::string);
 std::string txnType(boost::property_tree::ptree, std::string);
+
+std::string StringToJsonFormat(std::string);
+
 
 #endif UTILS_H

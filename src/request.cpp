@@ -10,6 +10,7 @@ jingtumlib::Request::Request(jingtumlib::Remote *r) {
 	_message = "";
 	pa.fg = true;
 	pa.str = "";
+	pa.addr = 0;
 }
 
 jingtumlib::Request::Request(jingtumlib::Remote *r, std::string command, std::string (* filter)(std::string, para) ) {
@@ -19,24 +20,46 @@ jingtumlib::Request::Request(jingtumlib::Remote *r, std::string command, std::st
 	_message = "";	
 	pa.fg = true;
 	pa.str = "";
+	pa.addr = 0;
 };
 
-void jingtumlib::Request::submit(void(* callback)(std::string, std::string, Remote *)) {	
+void jingtumlib::Request::submit() {
+	std::cout << "request submit1:" << std::endl;
+	rem->_submit(_command, _message, pa, _filter);
+}
+
+void jingtumlib::Request::submit(void(* callback)(std::string, std::string)) {	
+	std::cout << "request submit2:" << std::endl;
+
 	std::size_t found = _message.find("Exception");
 	int k;
 	if (found != std::string::npos) {
 		std::stringstream t(_message.substr(found + 9, 2));
 		t >> k;
-		callback(_message.substr(found+12,k), "", NULL);
+		callback(_message.substr(found + 12,k), "");
 	}
 	else {
-		rem->_submit(_command, _message, pa, NULL, callback);
+		rem->_submit(_command, _message, pa, _filter, callback);
+	}	
+}
+
+void jingtumlib::Request::submit(void(*callback)(std::string, std::string, int)) {
+	std::cout << "request submit3:" << std::endl;
+
+	std::size_t found = _message.find("Exception");
+	int k;
+	if (found != std::string::npos) {
+		std::stringstream t(_message.substr(found + 9, 2));
+		t >> k;
+		callback(_message.substr(found + 12, k), "", 0);
 	}
-	
+	else {
+		rem->_submit(_command, _message, pa, _filter, callback);
+	}
 }
 
 void jingtumlib::Request::selectLedger(boost::property_tree::ptree pt) {
-	long int index;
+	int index;
 	std::string st;
 	int flag;
 	bool tereg = false;
@@ -46,7 +69,7 @@ void jingtumlib::Request::selectLedger(boost::property_tree::ptree pt) {
 	}
 	catch (std::exception ex) { flag = 0; }
 	try {
-		index = pt.get<long int>("ledger");
+		index = pt.get<int>("ledger");
 		flag = 2;
 	}
 	catch (std::exception ex) { flag = 0; }

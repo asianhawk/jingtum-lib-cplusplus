@@ -7,16 +7,16 @@ std::string AccountSetTypes[3] = { "property", "delegate", "signer" };
 
 jingtumlib::Remote::Remote(std::string serverInfo) {
 
-	std::stringstream str_stream(serverInfo);
+	std::stringstream str(serverInfo);
 	boost::property_tree::ptree pt;
 	try {
-		boost::property_tree::read_json(str_stream, pt);		
+		boost::property_tree::read_json(str, pt);		
 	}
-	catch (std::exception ex) {
-		std::cout << ex.what() << "Server Information Parse Error!" <<std::endl;
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() + std::string("Server Information Parse Error!") <<std::endl;
 		exit(0);
 	}
-
+	
 	_url = pt.get<std::string>("server");
 	_localsign = pt.get<bool>("local_sign");
 	parseUrl(_url);
@@ -25,12 +25,18 @@ jingtumlib::Remote::Remote(std::string serverInfo) {
 		std::cout << "Please Check the Protocol!" << std::endl;
 		exit(0);
 	}
+
+	_status.put("ledger_index", 0);
+	_cache = new LRUCache(100);
+	_paths = new LRUCache(2100); 
 };
 	
 jingtumlib::Remote::~Remote() {
 	if (server) {
 		delete server;
 	}
+	delete _cache;
+	delete _paths;
 }
 
 void jingtumlib::Remote::connect(void (* callback)(std::string, std::string, Remote *)) {
@@ -43,20 +49,7 @@ void jingtumlib::Remote::connect(void (* callback)(std::string, std::string, Rem
 			exit(0);
 		}
 
-		try {
-			if (server->connect() == true) {
-				server->_opened = true;
-				std::string text = "[\"ledger\",\"server\"]";
-				Request req = subscribe(text);
-				req.submit(NULL);				
-				callback("", server->bmsg[0].backmsg, this);
-			}
-		}
-		catch (std::exception ex) {
-			std::cout << ex.what() << "Server Connecting Wrong!" << std::endl;
-			callback(ex.what(), "", NULL);
-			exit(0);
-		}
+		server->connect(this, callback);
 	}
 	else {
 		std::cout << "Connection has established!" << std::endl;
@@ -64,34 +57,75 @@ void jingtumlib::Remote::connect(void (* callback)(std::string, std::string, Rem
 }
 
 void jingtumlib::Remote::disConnect() {
-	if (server != NULL && server->_connected == true) {
-		server->disconnect();
-	}
+	if (server == NULL) return;
+	server->disconnect();
 }
 
-void jingtumlib::Remote::_submit(std::string command, std::string data, para req, std::string (* filter)(std::string, para), void(* callback)(std::string, std::string, Remote *)) {
+void jingtumlib::Remote::_submit(std::string command, std::string data, para pa, std::string(*filter)(std::string, para)) {
 	try {
 		int id = server->sendMessage(command, data);
 		std::cout << "Request Serial Number:" << id << std::endl;
-
-		_handleMessage(id, server->bmsg[id].datatype);
-
+		_handleMessage(server->bmsg[id].backmsg);
 		if (server->bmsg[id].datastatus == "success") {
-			if (filter != NULL) {	
-				server->bmsg[id].backmsg = filter(server->bmsg[id].backmsg, req);
+			if (filter != NULL) {
+				server->bmsg[id].dataresult = filter(server->bmsg[id].dataresult, pa);
 			}
-		}				
-	
-		if (callback != NULL) {
-			callback("", server->bmsg[id].backmsg, this);
 		}
 	}
 	catch (std::exception ex) {
+		std::cout << "something wrong" << std::endl;
 		std::cout << ex.what() << "Backend Message Error!" << std::endl;
-		callback(ex.what(), "", NULL);
 		exit(0);
 	}
+}
 
+void jingtumlib::Remote::_submit(std::string command, std::string data, para pa, std::string (* filter)(std::string, para), void(* callback)(std::string, std::string)) {
+	try {
+		int id = server->sendMessage(command, data);
+		std::cout << "Request Serial Number:" << id << std::endl;
+		_handleMessage(server->bmsg[id].backmsg);
+		if (server->bmsg[id].datastatus == "success") {
+			if (filter != NULL) {	
+				server->bmsg[id].dataresult = filter(server->bmsg[id].dataresult, pa);
+			}
+		}				
+
+		if (callback != NULL) {
+			callback("", server->bmsg[id].dataresult);
+		}
+	}
+	catch (std::exception ex) {
+		std::cout << "something wrong" << std::endl;
+		std::cout << ex.what() << "Backend Message Error!" << std::endl;
+		callback(ex.what(), "");
+		exit(0);
+	}
+}
+
+void jingtumlib::Remote::_submit(std::string command, std::string data, para pa, std::string(*filter)(std::string, para), void(*callback)(std::string, std::string, int)) {
+	try {
+		int id = server->sendMessage(command, data);
+		std::cout << "Request Serial Number:" << id << std::endl;
+		std::cout << "remote submit3:" << std::endl;
+		_handleMessage(server->bmsg[id].backmsg);
+		std::cout << "step 1 finish:" << std::endl;
+		if (server->bmsg[id].datastatus == "success") {
+			if (filter != NULL) {
+				server->bmsg[id].dataresult = filter(server->bmsg[id].dataresult, pa);
+			}
+		}
+		std::cout << "step 2 finish:" << std::endl;
+		if (callback != NULL) {
+			callback("", server->bmsg[id].dataresult, pa.addr);
+		}
+		std::cout << "step 3 finish:" << std::endl;
+	}
+	catch (std::exception ex) {
+		std::cout << "something wrong" << std::endl;
+		std::cout << ex.what() << "Backend Message Error!" << std::endl;
+		callback(ex.what(), "", pa.addr);
+		exit(0);
+	}
 }
 
 jingtumlib::Request jingtumlib::Remote::subscribe(std::string text) {
@@ -130,11 +164,11 @@ jingtumlib::Request jingtumlib::Remote::requestLedger(std::string option) {
 	}
 	else {
 		bool sf;
-		long int index;
+		int index;
 		std::string st;
 		int flag = 0;
 		try {
-			index = pt.get<long int>("ledger_index");
+			index = pt.get<int>("ledger_index");
 			flag = 1;
 		}
 		catch (boost::property_tree::ptree_error ex) { flag = 0; }
@@ -234,14 +268,16 @@ void jingtumlib::Remote::_requestAccount(std::string option, Request *req) {
 
 	int flag = 0;
 	std::string st;
-
 	try {
 		st = pt.get<std::string>("type");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
-	if (flag == 1) {		
-		req->_message = req->_message + ",\"relation_type\":" + std::to_string(getRelationType(st));
+	if (flag == 1) {	
+		int tp = getRelationType(st);
+		if (tp != -1) {
+			req->_message = req->_message + ",\"relation_type\":" + std::to_string(getRelationType(st));
+		}
 	}
 
 	try {
@@ -275,15 +311,15 @@ void jingtumlib::Remote::_requestAccount(std::string option, Request *req) {
 		}
 	}
 
-	long int limit;
+	int limit;
 	try {
-		limit = pt.get<long int>("limit");
+		limit = pt.get<int>("limit");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
 	if (flag == 1) {
 		if (limit < 0) limit = 0;
-		if (limit > 1e9) limit = (long int)1e9;
+		if (limit > 1e9) limit = (int)1e9;
 		req->_message = req->_message + ",\"limit\":" + std::to_string(limit);
 	}
 
@@ -408,7 +444,7 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 
 	std::string st;
 	int flag;
-	long int k;
+	int k;
 	try {
 		st = pt.get<std::string>("account");
 		flag = 1;
@@ -426,7 +462,7 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 	}
 
 	try {
-		k = pt.get<long int>("ledger_min");
+		k = pt.get<int>("ledger_min");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }	
@@ -438,7 +474,7 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 	}
 
 	try {
-		k = pt.get<long int>("ledger_max");
+		k = pt.get<int>("ledger_max");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
@@ -450,7 +486,7 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 	}
 
 	try {
-		k = pt.get<long int>("limit");
+		k = pt.get<int>("limit");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
@@ -459,7 +495,7 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 	}
 
 	try {
-		k = pt.get<long int>("offset");
+		k = pt.get<int>("offset");
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
@@ -475,13 +511,13 @@ jingtumlib::Request jingtumlib::Remote::requestAccountTx(std::string option) {
 	catch (boost::property_tree::ptree_error ex) {	flag = 0; }
 	if (flag == 1) {
 		try {
-			k = market.get<long int>("ledger");
+			k = market.get<int>("ledger");
 			flag = 2;
 		}
 		catch (boost::property_tree::ptree_error ex) { flag = 0; }
 		if (flag == 2 && k != NAN) {
 			try {
-				k = market.get<long int>("seq");
+				k = market.get<int>("seq");
 				flag = 3;
 			}
 			catch (boost::property_tree::ptree_error ex) { flag = 0; }
@@ -565,80 +601,769 @@ jingtumlib::Request jingtumlib::Remote::requestOrderBook(std::string option) {
 	return req;
 }
 
-void jingtumlib::Remote::_handleMessage(int id, std::string datatype) {
+jingtumlib::Transaction jingtumlib::Remote::buildPaymentTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string src, dst;
+	boost::property_tree::ptree amount;
+	try {
+		src = pt.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) { }
+	try {
+		src = pt.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) { }
+	try {
+		src = pt.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) { }
+	if (!isValidAddress(src)) {
+		tx.tx_json.put("src", "Exception23:invalid source address!");
+		return tx;
+	}
+
+	try {
+		dst = pt.get<std::string>("destination");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		dst = pt.get<std::string>("to");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(dst)) {
+		tx.tx_json.put("dst", "Exception28:invalid destination address!");
+		return tx;
+	}
+
+	amount = pt.get_child("amount");
+	if (!isValidAmount(amount)){
+		tx.tx_json.put("amount", "Exception15:invalid amount!");
+		return tx;
+	}
+
+	tx.tx_json.put("TransactionType", "Payment");
+	tx.tx_json.put("Account", src);
+	tx.tx_json.put_child("Amount", ToAmount(amount));
+	tx.tx_json.put("Destination", dst);
+
+	return tx;
+}
+
+jingtumlib::Transaction jingtumlib::Remote::buildRelationTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string type = pt.get<std::string>("type");
+	int nt = sizeof(RelationTypes) / sizeof(RelationTypes[0]);
+	int index = -1;
+	for (int i = 0; i < nt; ++i) {
+		if (type == RelationTypes[i]) {
+			index = i;
+			break;
+		}
+	}
+	if (index == -1) {
+		tx.tx_json.put("type", "Exception21:invalid relation type");
+		return tx;
+	}
+
+	if (type == "trust") {
+		_buildTrustSet(pt, &tx);
+		return tx;
+	}
+	else if (type == "authorize" || type == "freeze" || type == "unfreeze") {
+		_buildRelationSet(pt, &tx);
+		return tx;
+	}
+
+	tx.tx_json.put("msg", "Exception37:build relation set should not go here");
+	return tx;
+}
+
+void jingtumlib::Remote::_buildTrustSet(boost::property_tree::ptree option, jingtumlib::Transaction *tx) {
+	std::string src;
+	try {
+		src = option.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx->tx_json.put("src", "Exception23:invalid source address!");
+	}	
+	tx->tx_json.put("Account", src);
+
+	boost::property_tree::ptree limit;
+	int flag;
+	try {
+		limit = option.get_child("limit");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree ex) { flag = 0; }
+	if (flag == 1) {
+		if (!isValidAmount(limit)) {
+			tx->tx_json.put("limit", "Exception14:invalid amount");
+		}
+		else tx->tx_json.put_child("LimitAmount", limit);
+	}
 	
-	if (datatype == "") {
-		std::cout << "Unknow backend data type!" << std::endl;
-		exit(0);
+	std::string quality_out, quality_in;
+	flag = 0;
+	try {
+		quality_out = option.get<std::string>("quality_out");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (flag == 1) tx->tx_json.put("QualityOut", quality_out);
+
+	flag = 0;
+	try {
+		quality_in = option.get<std::string>("quality_in");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (flag == 1) tx->tx_json.put("QualityIn", quality_in);
+
+	tx->tx_json.put("TransactionType", "TrustSet");
+}
+
+void jingtumlib::Remote::_buildRelationSet(boost::property_tree::ptree option, jingtumlib::Transaction *tx) {
+	std::string src;
+	try {
+		src = option.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx->tx_json.put("src", "Exception23:invalid source address!");
+		return;
+	}
+	tx->tx_json.put("Account", src);
+
+	std::string des;
+	try {
+		des = option.get<std::string>("target");
+	}
+	catch (boost::property_tree::ptree ex) {}
+	if (!isValidAddress(src)) {
+		tx->tx_json.put("des", "Exception23:invalid source address!");
+		return;
+	}
+	tx->tx_json.put("Target", des);
+
+	boost::property_tree::ptree limit;
+	int flag;
+	try {
+		limit = option.get_child("limit");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree ex) {}
+	if (flag == 1) {
+		if (!isValidAmount(limit)) {
+			tx->tx_json.put("limit", "Exception14:invalid amount");
+		}
+		else tx->tx_json.put_child("LimitAmount", limit);
+	}
+	
+	
+
+	std::string type = option.get<std::string>("type");
+	tx->tx_json.put("TransactionType", type == "unfreeze" ? "RelationDel" : "RelationSet");
+	tx->tx_json.put("RelationType", type == "authorize" ? 1 : 3);
+}
+
+jingtumlib::Transaction jingtumlib::Remote::buildAccountSetTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string type = pt.get<std::string>("type");
+	int nt = sizeof(AccountSetTypes) / sizeof(AccountSetTypes[0]);
+	int index = -1;
+	for (int i = 0; i < nt; ++i) {
+		if (type == AccountSetTypes[i]) {
+			index = i;
+			break;
+		}
+	}
+	if (index == -1) {
+		tx.tx_json.put("type", "Exception21:invalid account set type");
+		return tx;
+	}
+
+	if (type == "property") {
+		_buildAccountSet(pt, &tx);
+		return tx;
+	}
+	else if (type == "delegate") {
+		_buildDelegateKeySet(pt, &tx);
+		return tx;
+	}
+	else if (type == "signer") {
+		_buildSignerSet(pt, &tx);
+		return tx;
 	}
 	else {
-		if (datatype == "ledgerClosed") {
-			_handleLedgerClosed();
+		tx.tx_json.put("msg", "Exception37:build relation set should not go here");
+	}
+
+	return tx;
+}
+
+void jingtumlib::Remote::_buildAccountSet(boost::property_tree::ptree option, jingtumlib::Transaction *tx) {
+	std::string src;
+	try {
+		src = option.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx->tx_json.put("src", "Exception23:invalid source address!");
+		return;
+	}
+	tx->tx_json.put("Account", src);
+	tx->tx_json.put("TransactionType", "AccountSet");
+
+	int flag;
+	std::string set_flag;
+	try {
+		set_flag = option.get<std::string>("set_flag");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) { flag = 0; }
+	try {
+		set_flag = option.get<std::string>("set");
+		flag = 2;
+	}
+	catch (boost::property_tree::ptree_error ex) { flag = 0; }
+	set_flag = prepareFlag(set_flag);
+	if (flag != 0 && set_flag != "") {
+		tx->tx_json.put("SetFlag", set_flag);
+	}
+
+	flag = 0;
+	std::string clear_flag;
+	try {
+		clear_flag = option.get<std::string>("clear_flag");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		clear_flag = option.get<std::string>("clear");
+		flag = 2;
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	clear_flag = prepareFlag(clear_flag);
+	if (flag != 0 && clear_flag != "") {
+		tx->tx_json.put("ClearFlag", clear_flag);
+	}
+
+}
+
+std::string prepareFlag(std::string flag) {
+	boost::property_tree::ptree SetClearFlags = TransactionSetClearFlags().get_child("AccountSet");
+	if (isNum(flag)) return flag;
+	else if (flag.find("asf") != 0) {
+		flag = "asf" + flag;
+	}
+	int f = 0;
+	try {
+		flag = SetClearFlags.get<std::string>(flag);
+		f = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (f == 1) return flag;
+	else return "";
+}
+
+void jingtumlib::Remote::_buildDelegateKeySet(boost::property_tree::ptree option, jingtumlib::Transaction *tx) {
+	std::string src;
+	try {
+		src = option.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = option.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx->tx_json.put("src", "Exception23:invalid source address!");
+		return;
+	}
+	tx->tx_json.put("Account", src);
+	tx->tx_json.put("TransactionType", "SetRegulatKey");
+
+	std::string delegate_key;
+	try {
+		delegate_key = option.get<std::string>("delegate_key");
+	}
+	catch(boost::property_tree::ptree_error ex){}
+	if (!isValidAddress(delegate_key)) {
+		tx->tx_json.put("delegate_key", "Exception23:invalid regular key address!");
+		return;
+	}
+	tx->tx_json.put("RegularKey", delegate_key);
+}
+
+void jingtumlib::Remote::_buildSignerSet(boost::property_tree::ptree option, jingtumlib::Transaction *tx) {
+
+}
+
+jingtumlib::Transaction jingtumlib::Remote::buildOfferCreateTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string src;
+	try {
+		src = pt.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = pt.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = pt.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx.tx_json.put("src", "Exception23:invalid source address!");
+		return tx;
+	}
+	tx.tx_json.put("Account", src);
+
+	std::string offer_type;
+	try {
+		offer_type = pt.get<std::string>("type");
+	}
+	catch(boost::property_tree::ptree_error ex) {}
+	int nt = sizeof(OfferTypes) / sizeof(OfferTypes[0]);
+	int index = -1;
+	for (int i = 0; i < nt; ++i) {
+		if (offer_type == OfferTypes[i]) {
+			index = i;
+			break;
 		}
-		else if (datatype == "serverStatus") {
-			_handleServerStatus();
+	}
+	if (index == -1) {
+		tx.tx_json.put("offer_type", "Exception18:invalid offer type");
+		return tx;
+	}
+
+	boost::property_tree::ptree taker_gets;
+	try {
+		taker_gets = pt.get_child("taker_gets");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		taker_gets = pt.get_child("pays");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (taker_gets.size() == 0) {
+		if (!isNum(taker_gets.data())) {
+			tx.tx_json.put("taker_gets2", "Exception22:invalid to pays amount");
+			return tx;
 		}
-		else if (datatype == "response") {
-			_handleResponse(id);
+	}
+	else {
+		if (!isValidAmount(taker_gets)) {
+			tx.tx_json.put("taker_gets2", "Exception29:invalid to pays amount object");
+			return tx;
 		}
-		else if (datatype == "transaction") {
-			_handleTransaction();
+	}
+
+	boost::property_tree::ptree taker_pays;
+	try {
+		taker_pays = pt.get_child("taker_pays");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		taker_pays = pt.get_child("gets");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (taker_pays.size() == 0) {
+		if (!isNum(taker_pays.data())) {
+			tx.tx_json.put("taker_pays2", "Exception22:invalid to gets amount");
+			return tx;
 		}
-		else if (datatype == "path_find") {
-			_handlePathFind();
+	}
+	else {
+		if (!isValidAmount(taker_pays)) {
+			tx.tx_json.put("taker_pays2", "Exception29:invalid to gets amount object");
+			return tx;
 		}
+	}
+
+	tx.tx_json.put("TransactionType", "OfferCreate");
+	if (offer_type == "Sell") tx.setFlags(offer_type);
+	tx.tx_json.put_child("TakerPays", ToAmount(taker_pays));
+	tx.tx_json.put_child("TakerGets", ToAmount(taker_gets));
+	return tx;
+}
+
+jingtumlib::Transaction jingtumlib::Remote::buildOfferCancelTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string src;
+	try {
+		src = pt.get<std::string>("source");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = pt.get<std::string>("from");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	try {
+		src = pt.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree_error ex) {}
+	if (!isValidAddress(src)) {
+		tx.tx_json.put("src", "Exception23:invalid source address!");
+		return tx;
+	}
+	tx.tx_json.put("Account", src);
+
+	int sequence;
+	try {
+		sequence = pt.get<int>("sequence");
+	}
+	catch (boost::property_tree::ptree ex) { 
+		tx.tx_json.put("sequence", "Exception22:invalid sequence param!");
+		return tx;
+	}
+
+	tx.tx_json.put("OfferSequence", sequence);
+	tx.tx_json.put("TransactionType", "OfferCancel");
+	return tx;
+}
+
+jingtumlib::Transaction jingtumlib::Remote::deployContractTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string account;
+	try {
+		account = pt.get<std::string>("account");
+	}
+	catch(boost::property_tree::ptree ex){}
+	if (!isValidAddress(account)) {
+		tx.tx_json.put("account", "Exception16:invalid address!");
+		return tx;
+	}
+	tx.tx_json.put("Account", account);
+
+	double amount;
+	try {
+		amount = pt.get<double>("amount");
+	}
+	catch (boost::property_tree::ptree ex) { 
+		tx.tx_json.put("amount", "Exception15:invalid amount!");
+		return tx;
+	}
+	tx.tx_json.put("Amount", amount*1000000);
+
+	std::string payload;
+	try {
+		payload = pt.get<std::string>("payload");
+	}
+	catch (boost::property_tree::ptree ex) {
+		tx.tx_json.put("payload", "Exception28:invalid payload: type error!");
+		return tx;
+	}
+	payload = processContract(payload);
+	tx.tx_json.put("Payload", payload);
+
+	boost::property_tree::ptree params;
+	try {
+		params = pt.get_child("params");
+	}
+	catch (boost::property_tree::ptree ex) {
+		tx.tx_json.put("params", "Exception21:invalid options type!");
+		return tx;
+	}
+	
+	boost::property_tree::ptree c;
+	BOOST_FOREACH(boost::property_tree::ptree::value_type &v, params) {
+		boost::property_tree::ptree a;
+		boost::property_tree::ptree b;
+		a.put("Parameter", StringToHex(v.second.data()));
+		b.put_child("Arg", a);
+		c.push_back(std::make_pair("", b));
+	}
+	tx.tx_json.put_child("Args", c);
+
+	tx.tx_json.put("TransactionType", "ConfigContract");
+	tx.tx_json.put("Method", 0);
+	return tx;
+}
+
+jingtumlib::Transaction jingtumlib::Remote::callContractTx(std::string option) {
+	Transaction tx(this);
+	std::stringstream str_stream(option);
+	boost::property_tree::ptree pt;
+	try {
+		boost::property_tree::read_json(str_stream, pt);
+	}
+	catch (boost::property_tree::ptree_error ex) {
+		std::cout << ex.what() << "invalid options type!" << std::endl;
+		tx.tx_json.put("obj", "Exception21:invalid options type!");
+		return tx;
+	}
+
+	std::string account;
+	try {
+		account = pt.get<std::string>("account");
+	}
+	catch (boost::property_tree::ptree ex) {}
+	if (!isValidAddress(account)) {
+		tx.tx_json.put("account", "Exception16:invalid address!");
+		return tx;
+	}
+	tx.tx_json.put("Account", account);
+
+	std::string des;
+	try {
+		des = pt.get<std::string>("destination");
+	}
+	catch (boost::property_tree::ptree ex) {}
+	if (!isValidAddress(des)) {
+		tx.tx_json.put("des", "Exception20:invalid destination!");
+		return tx;
+	}
+	tx.tx_json.put("Destination", des);
+
+	boost::property_tree::ptree params;
+	int flag = 0;
+	try {
+		params = pt.get_child("params");
+		flag = 1;
+	}
+	catch (boost::property_tree::ptree ex) {}
+	try {		
+		if ( flag == 1 && params.size() > 0 ) {
+			int f = 0;
+			boost::property_tree::ptree c;
+			BOOST_FOREACH(boost::property_tree::ptree::value_type &v, params) {
+				if (v.first != "") {
+					f = 1; 
+					break;
+				}
+				if (v.second.data() == "") {
+					tx.tx_json.put("params", "Exception21:params must be string");
+					return tx;
+				}
+				boost::property_tree::ptree a;
+				boost::property_tree::ptree b;
+				a.put("Parameter", StringToHex(v.second.data()));
+				b.put_child("Arg", a);
+				c.push_back(std::make_pair("", b));
+			}
+			if (f == 1) {
+				tx.tx_json.put("params", "Exception20:invalid option type!");
+				return tx;
+			}
+			tx.tx_json.put_child("Args", c);
+		}
+	}
+	catch(std::exception ex) {}
+
+	std::string foo;
+	try {
+		foo = pt.get<std::string>("foo");
+	}
+	catch (boost::property_tree::ptree ex) {
+		tx.tx_json.put("foo", "Exception18:foo must be string");
+		return tx;
+	}
+	tx.tx_json.put("ContractMethod", StringToHex(foo));
+
+	tx.tx_json.put("TransactionType", "ConfigContract");
+	tx.tx_json.put("Method", 1);
+
+	return tx;
+}
+
+void jingtumlib::Remote::_handleMessage(std::string data) {
+	
+	std::stringstream str(data);
+	boost::property_tree::ptree datajs;
+	try {
+		boost::property_tree::read_json(str, datajs);
+	}
+	catch (boost::property_tree::ptree_error ex) { std::cout << ex.what() << std::endl; return; }
+	if (datajs.size() == 0) return;
+	std::string datatype = datajs.get<std::string>("type");
+	if (datatype == "ledgerClosed") {
+		_handleLedgerClosed(datajs);
+	}
+	else if (datatype == "serverStatus") {
+		_handleServerStatus(datajs);
+	}
+	else if (datatype == "response") {
+		_handleResponse(datajs);
+	}
+	else if (datatype == "transaction") {
+		_handleTransaction(datajs);
+	}
+	else if (datatype == "path_find") {
+		_handlePathFind(datajs);
+	}
+	
+}
+
+void jingtumlib::Remote::_handleLedgerClosed(boost::property_tree::ptree data) {
+	if (data.get<int>("ledger_index") > _status.get<int>("ledger_index")) {
+		_status.put("ledger_index", data.get<int>("ledger_index"));
+		_status.put("ledger_time", data.get<int>("ledger_time"));
+		_status.put("reserve_base", data.get<int>("reserve_base"));
+		_status.put("reserve_inc", data.get<int>("reserve_inc"));
+		_status.put("fee_base", data.get<int>("fee_base"));
+		_status.put("fee_ref", data.get<int>("fee_ref"));
+		//注意，事件绑定时可能要修改
+		Request req = subscribe("ledger_closed");
+		req.submit();
 	}
 }
 
-void jingtumlib::Remote::_handleLedgerClosed() {
-
+void jingtumlib::Remote::_handleServerStatus(boost::property_tree::ptree data) {
+	_updateServerStatus(data);
+	//注意，事件绑定时可能要修改
+	/*Request req = subscribe("server_status");
+	req.submit(NULL);*/
 }
 
-void jingtumlib::Remote::_handleServerStatus() {
-
-}
-
-void jingtumlib::Remote::_handleResponse(int id) {
+void jingtumlib::Remote::_handleResponse(boost::property_tree::ptree data) {
 	
-	if (server->bmsg[id].dataid != (int)server->bmsg[id].dataid || server->bmsg[id].dataid < 0) {
+	int req_id,flag;
+	try { req_id = data.get<int>("id"); flag = 1; }
+	catch (boost::property_tree::ptree ex) { flag = 0; };
+	if ( flag != 1 || req_id < 0 || (unsigned int)req_id > server->bmsg.size()) {
 		return;
 	}
 
-	if (server->bmsg[id].dataresult != "" && server->bmsg[id].datastatus == "success" && server->bmsg[id].dataresultServerStatus != "" ) {
-		_updateServerStatus(id);
-	}
-}
-
-void jingtumlib::Remote::_handleTransaction() {
-
-}
-
-void jingtumlib::Remote::_handlePathFind() {
-
-}
-
-void jingtumlib::Remote::_updateServerStatus(int id) {
-	std::stringstream str_stream(server->bmsg[id].dataresult);
-	boost::property_tree::ptree res;
-	/*try {*/
-		boost::property_tree::read_json(str_stream, res);
-	/*}
-	catch (std::exception ex) {
-		std::cout << ex.what()  << std::endl;
-		exit(0);
-	}*/
-
-	_status.put("load_base", res.get<std::string>("load_base"));
-	_status.put("load_factor", res.get<std::string>("load_factor"));
+	boost::property_tree::ptree result;
+	std::string server_status;
+	std::string status;
 	try {
-		_status.put("pubkey_node", res.get<std::string>("pubkey_node"));
+		result = data.get_child("result");
+		server_status = result.get<std::string>("server_status");
+		status = data.get<std::string>("status");
+		flag = 1;
 	}
-	catch (std::exception ex) {};
-	_status.put("server_status", res.get<std::string>("server_status"));
+	catch (boost::property_tree::ptree_error ex) { flag = 0; }
+	if ( flag == 1 && status == "success") {
+		_updateServerStatus(result);
+	}
+
+}
+
+void jingtumlib::Remote::_handleTransaction(boost::property_tree::ptree data) {
+	std::string tx = data.get_child("transaction").get<std::string>("hash");
+	if (_cache->get(tx) != "") return;
+	_cache->set(tx, std::to_string(1));
+	Request req = subscribe("transactions");
+	req.submit();
+
+}
+
+void jingtumlib::Remote::_handlePathFind(boost::property_tree::ptree data) {
+	/*Request req = subscribe("path_find");
+	req.submit(NULL);*/
+}
+
+void jingtumlib::Remote::_updateServerStatus(boost::property_tree::ptree data) {
+	
+	_status.put("load_base", data.get<std::string>("load_base"));
+	_status.put("load_factor", data.get<std::string>("load_factor"));
+	try {
+		_status.put("pubkey_node", data.get<std::string>("pubkey_node"));
+	}
+	catch (std::exception ex) { std::cout << ex.what() << std::endl; };
+	_status.put("server_status", data.get<std::string>("server_status"));
 
 	int index;
 	for (unsigned int i = 0; i < 6; ++i) {
-		if (res.get<std::string>("server_status") == server->onlineStates[i]) index = i;
+		if (data.get<std::string>("server_status") == server->onlineStates[i]) index = i;
 	}
 	server->setState(~index ? "online" : "offline");
 }
@@ -752,6 +1477,7 @@ std::string callback_requestLedger(std::string msg, para data) {
 
 // requestAccountTx 回调函数
 std::string callback_requestAccountTx(std::string msg, para data) {
+
 	boost::property_tree::ptree result;
 	std::stringstream str_stream(msg);
 	boost::property_tree::ptree pt;
@@ -763,7 +1489,7 @@ std::string callback_requestAccountTx(std::string msg, para data) {
 		boost::property_tree::ptree _tx = processTx(v.second, data.str);
 		result.push_back(std::make_pair("", _tx));  
 	}	
-	
+
 	pt.erase("transactions");  
 	pt.put_child("transactions", result);  
 	std::stringstream out;
@@ -783,6 +1509,10 @@ int getRelationType(std::string type) {
 		return 2;
 	}
 	return -1;
+}
+
+std::string processContract(std::string str) {
+	return StringToHex(str);
 }
 
 

@@ -36,7 +36,7 @@ bool jingtumlib::BasicConnect::CloseConnect() {
 			return true;
 		}
 		catch (std::exception ex) {
-			std::cout << ex.what() << "Server Information Parse Error!" << std::endl;
+			std::cout << ex.what() + std::string("Server Information Parse Error!") << std::endl;
 			exit(0);
 		}
 		
@@ -47,7 +47,7 @@ bool jingtumlib::BasicConnect::CloseConnect() {
 			return true;
 		}
 		catch (std::exception ex) {
-			std::cout << ex.what() << "Server Information Parse Error!" << std::endl;
+			std::cout << ex.what() + std::string("Server Information Parse Error!") << std::endl;
 			exit(0);
 		}
 	}
@@ -84,6 +84,24 @@ jingtumlib::Server::Server(std::string protocol, std::string domain, std::string
 	_opened = false;
 	_state = "offline";
 	id = 0;
+	/*boost::regex domain_RE("^(?=.{1,255}$)[0-9A-Za-z](?:(?:[0-9A-Za-z]|[-_]){0,61}[0-9A-Za-z])?(?:\.[0-9A-Za-z](?:(?:[0-9A-Za-z]|[-_]){0,61}[0-9A-Za-z])?)*\.?$");
+	boost::smatch m;
+	try {
+		if (!regex_match(domain, m, domain_RE)) throw std::string("Server host incorrect");
+	}
+	catch (std::string ex) { std::cout << ex << std::endl; exit(0); }*/
+			
+	/*try {
+		int Port;
+		if (isInt(port)) {
+			std::stringstream str(port);
+			str >> Port;
+			if (Port < 1 || Port > 65535) throw std::string("Server host incorrect");
+		}
+		else throw std::string("server port is not a number");		
+	}
+	catch (std::string ex) { std::cout << ex << std::endl; exit(0); }*/
+
 	if (protocol == "ws") {
 		flag = 0;
 		cns = new ConnectNoSSL(protocol, domain, port);
@@ -103,7 +121,7 @@ jingtumlib::Server::~Server() {
 	}
 }
 
-bool jingtumlib::Server::connect() {
+bool jingtumlib::Server::basicconnect() {	
 	if (flag == 0) {
 		try {
 			cns->Connect();
@@ -125,6 +143,38 @@ bool jingtumlib::Server::connect() {
 		return true;
 	}
 	return false;
+}
+
+void jingtumlib::Server::connect(Remote *rem, void(*callback)(std::string, std::string, Remote *)) {
+
+	if (_connected) return;
+		
+	try {
+		_connected = basicconnect();
+	}
+	catch (std::exception ex) {
+		std::cout << ex.what() << "Server Connecting Wrong!" << std::endl;
+		callback(ex.what(), "", NULL);
+		exit(0);
+	}
+	
+	while (_connected) {
+
+		//ÊÂ¼þ°ó¶¨
+		//on
+		_opened = true;
+		std::string text = "[\"ledger\",\"server\"]";
+		Request req = rem->subscribe(text);
+		req.submit();
+		rem->_handleMessage(bmsg[0].backmsg);		
+		callback("", StringToJsonFormat(bmsg[0].dataresult), rem);
+		//message
+		//close
+		//error
+		
+	}
+
+	
 }
 
 int jingtumlib::Server::sendMessage(std::string command, std::string data) {
@@ -158,7 +208,8 @@ int jingtumlib::Server::sendMessage(std::string command, std::string data) {
 	else if (flag == 1) {
 		msgt = cs->Message(text);
 	}
-	cbm.backmsg = getResult(msgt);
+	cbm.backmsg = msgt;
+	getResult(msgt);
 
 	bmsg.push_back(cbm);
 	return id++;
@@ -166,18 +217,18 @@ int jingtumlib::Server::sendMessage(std::string command, std::string data) {
 
 bool jingtumlib::Server::disconnect() {
 	if (flag == 0) {
-		_connected = cns->CloseConnect();
-		return !_connected;
+		_connected = !cns->CloseConnect();
+		return _connected;
 	}
 	else if (flag == 1) {
-		_connected = cs->CloseConnect();
-		return !_connected;
+		_connected = !cs->CloseConnect();
+		return _connected;
 	}
 	setState("offline");
 	return false;
 }
 
-std::string jingtumlib::Server::getResult(std::string msg) {
+void jingtumlib::Server::getResult(std::string msg) {
 	std::stringstream str_stream(msg);
 	boost::property_tree::ptree pt;
 	try {
@@ -225,15 +276,26 @@ std::string jingtumlib::Server::getResult(std::string msg) {
 	}
 	
 	std::cout << "msg:" << msg << std::endl;
-	return cbm.dataresult;
 	
 }
 
 void jingtumlib::Server::setState(std::string state) {
+	if (_state == state) return;
+
 	_state = state;
 	_connected = (state == "online");
 	if (!_connected) {
 		_opened = false;
 	}
+}
+
+bool jingtumlib::Server::isConnected() {
+	return _connected;
+}
+
+void jingtumlib::Server::_handleClose() {
+	if (_state == "offline") return;
+	setState("offline");
+	disconnect();
 }
 

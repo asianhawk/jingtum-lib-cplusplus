@@ -3,7 +3,7 @@
 
 std::string HexToString(std::string h) {
 	int i = 0;
-	int index = 0;
+	//int index = 0;
 	int len = h.length();
 	const char *st = h.c_str();
 	char a;
@@ -11,24 +11,26 @@ std::string HexToString(std::string h) {
 
 	if (len % 2) {
 		a = hex2int(st[0]);
-		s.append(1,a);
+		//s.append(1,a);
+		s += a;
 		i = 1;
-		index = 1;
+		//index = 1;
 	}
 	for (; i < len; i += 2) {
 		a = hex2int(st[i]) * 16 + hex2int(st[i + 1]);
-		s.append(1,a);
-		index++;
+		//s.append(1,a);
+		s += a;
+		//index++;
 	}
 
 	return s;
 }
 
 std::string StringToHex(std::string h) {
-	std::string s;
-	char b[3] = {0};
-	for (unsigned int i=0; i < h.length(); ++i) {
-		sprintf_s(b, "%02x", h[i]);
+	std::string s="";
+	char b[8] = {0};
+	for (unsigned int i=0; i < h.length(); ++i) {		
+		sprintf_s(b, "%.2x",(unsigned char)h[i]);
 		s += b;
 	}
 
@@ -85,6 +87,19 @@ std::string string_To_UTF8(const std::string & str)
 	pwBuf = NULL;
 	pBuf = NULL;
 	return retStr;
+}
+
+std::vector<unsigned char> convertHexToByteArray(std::string str) {
+	if (str.length() % 2 != 0) str += "0";
+	std::vector<unsigned char> dst;
+	unsigned int i = 0;
+	while (i < str.length())
+	{
+		dst.push_back(hex2int(str[i]) * 16 + hex2int(str[i + 1]));
+		i += 2;
+	}
+
+	return dst;
 }
 
 std::string getPureStr(std::string str) {
@@ -271,6 +286,39 @@ boost::property_tree::ptree processAffectNode(boost::property_tree::ptree an) {
 	return result;
 }
 
+bool isNum(std::string str) {
+	std::stringstream sin(str);
+	double d;
+	char c;
+	if (!(sin >> d)) return false;
+	if (sin >> c) return false;
+	return true;
+}
+
+bool isInt(std::string str) {
+	if (isNum(str)) {
+		if (str.find(".") == std::string::npos) return true;
+		else return false;
+	}
+	return false;
+}
+
+bool isJSON(std::string s) {
+	if (s == "") return false;
+	if (s.length() <= 2) return false;
+	std::string::size_type le = s.find("{");
+	std::string::size_type ri = s.find("}");
+	if (le == std::string::npos || ri == std::string::npos) return false;
+
+	std::stringstream str(s);
+	boost::property_tree::ptree J;
+	try {
+		boost::property_tree::read_json(str, J);
+		return true;
+	}
+	catch (boost::property_tree::ptree_error ex) { return false; }
+}
+
 bool isValidHash(std::string hash) {
 	if (hash == "") {
 		return false;
@@ -287,16 +335,15 @@ bool isValidAddress(std::string addr) {
 bool isValidSecret(std::string secret) {
 	try {
 		unsigned char *pubkeychar;
+		unsigned char prikey[32];
 		std::string PrivateKey;
 		std::string PublicKey;
-		pubkeychar = deriveKeyPair(secret, &PublicKey, &PrivateKey);
+		pubkeychar = deriveKeyPair(secret, &PublicKey, &PrivateKey, prikey);
 		return true;
 	}
 	catch (std::exception ex) {
 		return false;
 	}
-	
-
 }
 
 bool isValidCurrency(std::string cur) {
@@ -390,8 +437,8 @@ boost::property_tree::ptree TransactionSetClearFlags() {
 	AccountSet.put("asfRequireAuth", 2);
 	AccountSet.put("asfDisallowSWT", 3);
 	AccountSet.put("asfDisableMaster", 4);
-	AccountSet.put("asfNoFreeze", 5);
-	AccountSet.put("asfGlobalFreeze", 6);
+	AccountSet.put("asfNoFreeze", 6);
+	AccountSet.put("asfGlobalFreeze", 7);
 	obj.put_child("AccountSet",AccountSet);
 
 	return obj;
@@ -445,11 +492,11 @@ boost::property_tree::ptree TransactionFlags() {
 
 boost::property_tree::ptree parseAmount(boost::property_tree::ptree tx, std::string str) {
 	boost::property_tree::ptree Sym;
-	long int sym;
+	float sym;
 	int flag;
 	Sym = tx.get_child(str);
 	if (Sym.size() == 0) {
-		sym = tx.get<long int>(str);
+		sym = tx.get<float>(str);
 		flag = 1;
 	}
 	else flag = 0;
@@ -695,16 +742,16 @@ boost::property_tree::ptree processTx(boost::property_tree::ptree txn, std::stri
 	}
 	catch (boost::property_tree::ptree_error ex) { metaexist = false; };
 	
-	long int date;
+	int date;
 	flag = 0;
 	try {
-		date = tx.get<long int>("date") + 0x386D4380;
+		date = tx.get<int>("date") + 0x386D4380;
 		flag = 1;
 	}
 	catch (boost::property_tree::ptree_error ex) { flag = 0; }
 	if (flag == 0) { 
 		try {
-			date = tx.get<long int>("Timestamp") + 0x386D4380;
+			date = tx.get<int>("Timestamp") + 0x386D4380;
 		}
 		catch(boost::property_tree::ptree_error ex) { flag = 0; }
 	}
@@ -958,5 +1005,44 @@ boost::property_tree::ptree processTx(boost::property_tree::ptree txn, std::stri
 
 
 	return result;
+}
+
+boost::property_tree::ptree ToAmount(boost::property_tree::ptree amount) {
+	double value;
+	int f1, f2;
+	try {
+		value = amount.get<double>("value");
+		f1 = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) { f1 = 0; }
+	if (f1 == 1 && value > 100000000000) {
+		boost::property_tree::ptree ex;
+		ex.put("invalid amount", "amount's maximum value is 100000000000");
+		return ex;
+	}
+
+	std::string cur;
+	try {
+		cur = amount.get<std::string>("currency");
+		f2 = 1;
+	}
+	catch (boost::property_tree::ptree_error ex) { f2 = 0; }
+	if (f1 && f2 && cur == currency) {
+		boost::property_tree::ptree str;
+		str.put("String", std::to_string(value*1000000.00));
+		return str;
+	}
+
+	return amount;
+}
+
+std::string StringToJsonFormat(std::string s) {
+	std::stringstream str(s);
+	boost::property_tree::ptree t;
+	boost::property_tree::read_json(str, t);
+	std::stringstream str2;
+	boost::property_tree::write_json(str2, t);
+
+	return str2.str();
 }
 
