@@ -1,0 +1,1 @@
+This folder contains the libraries which are referenced by jingtum-lib-cpp.
